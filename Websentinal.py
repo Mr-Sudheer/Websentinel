@@ -1,407 +1,551 @@
+import argparse
+import asyncio
+import json
+import re
+import time
+import random
+import sys
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from urllib.parse import urljoin, urldefrag, urlparse, parse_qs
+
 import requests
 from bs4 import BeautifulSoup
-import re
-import json
-from urllib.parse import urljoin, urldefrag, urlparse, parse_qs
-from collections import deque
-import time, random
 from playwright.sync_api import sync_playwright
-from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
 
-url=input("Target: ").strip()
 
-def requires_js(base_url):
+def parse_args():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python Websentinal.py -u https://example.com
+  python Websentinal.py -u https://example.com --depth 3 --threads 20
+  python Websentinal.py -u https://example.com --no-endpoints
+  python Websentinal.py -u https://example.com --wordlist my_wordlist.txt -o results
+        """
+    )
+    parser.add_argument("-u", "--url",         required=True,  help="Target URL")
+    parser.add_argument("--depth",             type=int, default=2,  help="Crawl depth (default: 2)")
+    parser.add_argument("--threads",           type=int, default=15, help="Concurrent threads (default: 15)")
+    parser.add_argument("--delay",             type=float, default=0.0, help="Delay between requests in seconds (default: 0)")
+    parser.add_argument("--timeout",           type=int, default=8,  help="Request timeout in seconds (default: 8)")
+    parser.add_argument("--wordlist",          default=None,   help="Path to custom hidden-endpoint wordlist file")
+    parser.add_argument("--no-endpoints",      action="store_true",  help="Skip endpoint discovery phase")
+    parser.add_argument("--no-dynamic",        action="store_true",  help="Skip dynamic (Playwright) endpoint scanning")
+    parser.add_argument("-o", "--output",      default="websentinal", help="Output file prefix (default: websentinal)")
+    parser.add_argument("--no-save",           action="store_true",  help="Don't save output files")
+    return parser.parse_args()
+
+
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+}
+
+BLOCKED_EXTENSIONS = (
+    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico", ".webp", ".css", ".woff", ".woff2", ".ttf", ".eot", ".pdf", 
+    ".zip", ".tar", ".gz", ".rar", ".mp4", ".mp3", ".avi", ".mov",
+)
+
+DEFAULT_WORDLIST = [
+    "api", "admin", "internal", "debug", "v1", "v2", "v3", "private", "secret", "config", "settings", "dashboard",
+    "login", "logout", "register", "signup", "auth", "oauth", "graphql", "rest", "docs", "swagger", "openapi",
+    "health", "status", "metrics", "monitor", "actuator", "user", "users", "account", "accounts", "profile", "upload", "uploads", 
+    "files", "assets", "static", "backup", "test", "dev", "staging", "beta",
+]
+
+ENDPOINT_PATTERNS = [
+    re.compile(r'''["'`](\/api\/[^"'`\s<>]+)["'`]'''),
+    re.compile(r'''["'`](\/v\d+\/[^"'`\s<>]+)["'`]'''),
+    re.compile(r'''["'`](\/graphql[^"'`\s<>]*)["'`]'''),
+    re.compile(r'https?://[^\s"\'<>]+/(?:api|v\d+)/[^\s"\'<>]+'),
+    re.compile(r'''fetch\s*\(\s*["'`]([^"'`]+)["'`]'''),
+    re.compile(r'''axios\.\w+\s*\(\s*["'`]([^"'`]+)["'`]'''),
+]
+
+
+def clean_url(url: str) -> str:
+    return urldefrag(url.split("#")[0])[0]
+
+def is_same_domain(url: str, netloc: str) -> bool:
+    return urlparse(url).netloc == netloc
+
+def is_blocked(url: str) -> bool:
+    return url.lower().endswith(BLOCKED_EXTENSIONS)
+
+def make_session(timeout: int) -> requests.Session:
+    s = requests.Session()
+    s.headers.update(DEFAULT_HEADERS)
+    return s
+
+def log(msg: str, level: str = "INFO"):
+    colors = {"INFO": "\033[94m", "OK": "\033[92m", "WARN": "\033[93m", "ERR": "\033[91m", "HEAD": "\033[96m"}
+    reset = "\033[0m"
+    prefix = colors.get(level, "") + f"[{level}]" + reset
+    print(f"{prefix} {msg}")
+
+#Extraction functions.
+
+def extract_links(soup: BeautifulSoup, base_url: str) -> set:
+    links = set()
+    for tag in soup.find_all(["a", "area"], href=True):
+        url = clean_url(urljoin(base_url, tag["href"]))
+        if url.startswith("http"):
+            links.add(url)
+    return links
+
+
+def extract_images(soup: BeautifulSoup, base_url: str) -> set:
+    imgs = set()
+    for tag in soup.find_all(["img", "source"], src=True):
+        imgs.add(urljoin(base_url, tag["src"]))
+    return imgs
+
+
+def extract_resources(soup: BeautifulSoup, base_url: str) -> set:
+    res = set()
+    for tag in soup.find_all("link", href=True):
+        res.add(urljoin(base_url, tag["href"]))
+    return res
+
+
+def extract_scripts(soup: BeautifulSoup, base_url: str) -> set:
+    scripts = set()
+    for tag in soup.find_all("script", src=True):
+        scripts.add(urljoin(base_url, tag["src"]))
+    return scripts
+
+
+def extract_inputs(soup: BeautifulSoup) -> list:
+    inputs = []
+    for tag in soup.find_all("input"):
+        inputs.append({
+            "name": tag.get("name"),
+            "type": tag.get("type", "text"),
+            "id":   tag.get("id"),
+        })
+    return inputs
+
+
+def extract_forms(soup: BeautifulSoup, base_url: str) -> list:
+    forms = []
+    for form in soup.find_all("form"):
+        action = urljoin(base_url, form.get("action") or base_url)
+        method = form.get("method", "get").upper()
+        fields = []
+        for inp in form.find_all(["input", "textarea", "select"]):
+            fields.append({
+                "name":  inp.get("name"),
+                "type":  inp.get("type", "text"),
+                "value": inp.get("value", ""),
+            })
+        forms.append({"action": action, "method": method, "fields": fields})
+    return forms
+
+
+def extract_parameters(url: str) -> dict:
+    return {k: list(v) for k, v in parse_qs(urlparse(url).query).items()}
+
+
+def extract_comments(soup: BeautifulSoup) -> list:
+    from bs4 import Comment
+    return [str(c).strip() for c in soup.find_all(string=lambda t: isinstance(t, Comment)) if str(c).strip()]
+
+
+def extract_meta(soup: BeautifulSoup) -> dict:
+    meta = {}
+    for tag in soup.find_all("meta"):
+        name = tag.get("name") or tag.get("property")
+        content = tag.get("content")
+        if name and content:
+            meta[name] = content
+    return meta
+
+
+#JS detection.
+
+def requires_js(base_url: str, session: requests.Session, timeout: int) -> bool:
     try:
-        r= requests.get(base_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if not r.ok:
-            print("Request failed.", r.status_code)
-            return False
-
-        soup=BeautifulSoup(r.text,"lxml")
-
-        raw_text = soup.get_text(strip=True)
+        r = session.get(base_url, timeout=timeout)
+        static_text = BeautifulSoup(r.text, "lxml").get_text(strip=True)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(base_url, timeout=15000)
-
-            page.wait_for_timeout(3000)
-
-            rendered_html = page.content()
+            page.goto(base_url, timeout=15000, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
+            rendered_text = BeautifulSoup(page.content(), "lxml").get_text(strip=True)
             browser.close()
-        
-        rendered_page = BeautifulSoup(rendered_html, "lxml")
-        rendered_text = rendered_page.get_text(strip=True)
 
-        if len(rendered_text) > len(raw_text)*2:
-            return True
-        
+        return len(rendered_text) > len(static_text) * 1.8
+    except Exception:
         return False
-        
-    except Exception as e:
-        return False
-    
-def extract_links(soup, base_url):
-    links=set()
 
-    for link in soup.find_all(["a"], href=True):
-        new_url=urljoin(base_url, link["href"])
-        clean_url=urldefrag(new_url).url
-        links.add(clean_url)
 
-    return links
+class Crawler:
+    def __init__(self, start_url: str, depth: int, threads: int, timeout: int, delay: float):
+        self.start_url   = start_url
+        self.start_netloc = urlparse(start_url).netloc
+        self.max_depth   = depth
+        self.threads     = threads
+        self.timeout     = timeout
+        self.delay       = delay
 
-def extract_images(soup, base_url):
-    images=set()
-    
-    for image in soup.find_all("img", src=True):
-        img_url=urljoin(base_url, image["src"])
-        images.add(img_url)
+        self.visited     = set()
+        self.queue       = deque([(start_url, 0)])
+        self.lock        = Lock()
+        self.session     = make_session(timeout)
 
-    return images
+        self.links      = set()
+        self.images     = set()
+        self.resources  = set()
+        self.scripts    = set()
+        self.inputs     = []
+        self.forms      = []
+        self.parameters = {}
+        self.comments   = []
+        self.meta       = {}
 
-def extract_resources(soup, base_url):
-    resources=set()
+    def _should_visit(self, url: str, depth: int) -> bool:
+        return (
+            url not in self.visited
+            and depth <= self.max_depth
+            and is_same_domain(url, self.start_netloc)
+            and not is_blocked(url)
+            and url.startswith("http")
+        )
 
-    for resource in soup.find_all("link", href=True):
-        rsc=urljoin(base_url, resource["href"])
-        resources.add(rsc)
-    
-    return resources
-
-def extract_script(soup, base_url):
-    scripts=set()
-
-    for jscript in soup.find_all("script", src=True):
-        js_url=urljoin(base_url, jscript["src"])
-        scripts.add(js_url)
-    
-    return scripts
-
-def extract_inputs(soup):
-    inputs=set()
-
-    for form in soup.find_all("input", type=True):
-        fname=form.get("name")
-        ftype=form.get("type")
-        inputs.add((fname, ftype))
-    return inputs
-
-def extract_forms(soup, base_url):
-    forms = []
-
-    for form in soup.find_all("form"):
-        action = form.get("action")
-        method = form.get("method", "get").lower()
-
-        full_action = urljoin(base_url, action)
-
-        inputs = []
-        for inp in form.find_all(["input", "textarea", "select"]):
-            inputs.append({
-                "name": inp.get("name"),
-                "type": inp.get("type", "text"),
-                "value": inp.get("value", "")
-            })
-
-        forms.append({
-            "action": full_action,
-            "method": method,
-            "inputs": inputs
-        })
-
-    return forms
-
-def extract_parameters(base_url):
-    parsed=urlparse(base_url)
-    params=parse_qs(parsed.query)
-
-    return params
-
-endpoint_patterns = [
-    re.compile(r'["\'](\/api\/[^"\']+)["\']'),
-    re.compile(r'["\'](\/v[0-9]+\/[^"\']+)["\']'),
-    re.compile(r'https?:\/\/[^\s"\']+\/api\/[^\s"\']+')
-]
-
-def static_endpoints(js_files):
-    endpoints = set()
-
-    for js in js_files:
+    def _fetch_and_parse(self, url: str, depth: int):
+        if self.delay > 0:
+            time.sleep(self.delay + random.uniform(0, self.delay * 0.5))
         try:
-            r = requests.get(js, timeout=5)
-            content = r.text
+            r = self.session.get(url, timeout=self.timeout)
+            if not r.ok:
+                return
+            ct = r.headers.get("content-type", "")
+            if "html" not in ct:
+                return
 
-            for pattern in endpoint_patterns:
-                matches = pattern.findall(content)
-                for m in matches:
-                    endpoints.add(m)
+            soup = BeautifulSoup(r.text, "lxml")
 
-        except:
-            continue
+            new_links  = extract_links(soup, url)
+            images     = extract_images(soup, url)
+            resources  = extract_resources(soup, url)
+            scripts    = extract_scripts(soup, url)
+            inputs     = extract_inputs(soup)
+            forms      = extract_forms(soup, url)
+            params     = extract_parameters(url)
+            comments   = extract_comments(soup)
+            meta       = extract_meta(soup)
+
+            with self.lock:
+                self.images.update(images)
+                self.resources.update(resources)
+                self.scripts.update(scripts)
+                self.inputs.extend(inputs)
+                self.forms.extend(forms)
+                self.comments.extend(comments)
+                self.meta.update(meta)
+                for k, v in params.items():
+                    self.parameters.setdefault(k, set()).update(v)
+
+                for link in new_links:
+                    link = clean_url(link)
+                    self.links.add(link)
+                    if self._should_visit(link, depth + 1):
+                        self.queue.append((link, depth + 1))
+
+        except Exception as e:
+            pass
+
+    def run(self) -> dict:
+        log(f"Starting crawl on {self.start_url} (depth={self.max_depth}, threads={self.threads})", "HEAD")
+        t0 = time.time()
+
+        with ThreadPoolExecutor(max_workers=self.threads) as pool:
+            futures = {}
+
+            def submit_pending():
+                while self.queue:
+                    url, depth = self.queue.popleft()
+                    url = clean_url(url)
+                    with self.lock:
+                        if not self._should_visit(url, depth):
+                            continue
+                        self.visited.add(url)
+                    f = pool.submit(self._fetch_and_parse, url, depth)
+                    futures[f] = url
+
+            submit_pending()
+
+            while futures:
+                done = set()
+                for f in as_completed(list(futures.keys())):
+                    done.add(f)
+                futures = {k: v for k, v in futures.items() if k not in done}
+                submit_pending()
+
+        elapsed = time.time() - t0
+        log(f"Crawl complete in {elapsed:.2f}s — "
+            f"{len(self.visited)} pages | {len(self.links)} links | "
+            f"{len(self.scripts)} scripts | {len(self.forms)} forms | "
+            f"{len(self.inputs)} inputs | {len(self.images)} images", "OK")
+
+        return {
+            "links":      self.links,
+            "images":     self.images,
+            "resources":  self.resources,
+            "scripts":    self.scripts,
+            "inputs":     self.inputs,
+            "forms":      self.forms,
+            "parameters": {k: list(v) for k, v in self.parameters.items()},
+            "comments":   self.comments,
+            "meta":       self.meta,
+        }
+
+#Endpoint discovery functions.
+
+def static_endpoint_scan(js_urls: list, session: requests.Session, threads: int) -> set:
+    endpoints = set()
+    lock = Lock()
+
+    def scan_one(js_url):
+        try:
+            r = session.get(js_url, timeout=8)
+            for pattern in ENDPOINT_PATTERNS:
+                for match in pattern.findall(r.text):
+                    with lock:
+                        endpoints.add(match)
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        list(pool.map(scan_one, js_urls))
 
     return endpoints
 
-def dynamic_endpoints(url):
-    dynamic_endpoints = set()
+
+def dynamic_endpoint_scan(url: str) -> set:
+    dynamic = set()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context(
+            user_agent=DEFAULT_HEADERS["User-Agent"],
+            ignore_https_errors=True,
+        )
+        page = context.new_page()
 
-        def handle_request(request):
-            if request.resource_type in ["xhr", "fetch"]:
-                dynamic_endpoints.add(request.url)
+        def on_request(req):
+            if req.resource_type in ("xhr", "fetch"):
+                dynamic.add(req.url)
 
-        def handle_response(response):
+        def on_response(resp):
             try:
-                if "application/json" in response.headers.get("content-type", ""):
-                    dynamic_endpoints.add(response.url)
-            except Exception as e:
+                ct = resp.headers.get("content-type", "")
+                if "application/json" in ct:
+                    dynamic.add(resp.url)
+            except Exception:
                 pass
 
-        page.on("request", handle_request)
-        page.on("response", handle_response)
+        page.on("request",  on_request)
+        page.on("response", on_response)
 
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=10000)
-            page.wait_for_timeout(3000)
-            buttons=page.query_selector_all("button")
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(2500)
 
-            for btn in buttons[:3]:
+            # Click common interactive elements to trigger more requests
+            for selector in ["button", '[role="button"]', 'a[href="#"]']:
                 try:
-                    text=btn.inner_text().lower()
-
-                    for x in ["login", "submit", "search"]:
-                        if x in text:
-                            if btn.is_visible() and btn.is_enabled():
-                                btn.click()
-                                page.wait_for_timeout(1000)
-                            break
-                except Exception as e:
-                    continue
+                    btns = page.query_selector_all(selector)
+                    for btn in btns[:5]:
+                        try:
+                            text = btn.inner_text().lower()
+                            if any(w in text for w in ("login", "submit", "search", "load", "more")):
+                                if btn.is_visible() and btn.is_enabled():
+                                    btn.click()
+                                    page.wait_for_timeout(800)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
         except Exception as e:
-            print("Dynamic scan error", e)
+            log(f"Dynamic scan error: {e}", "WARN")
+        finally:
+            browser.close()
 
-        browser.close()
+    return dynamic
 
-    return dynamic_endpoints
 
-def hidden_endpoints(base_url):
-    wordlist = ["api", "admin", "internal", "debug", "v1", "v2", "private"]
+def hidden_endpoint_scan(base_url: str, wordlist: list, session: requests.Session, threads: int) -> set:
     found = set()
+    lock = Lock()
 
-    for word in wordlist:
+    def probe(word):
         test_url = urljoin(base_url, f"/{word}")
-
         try:
-            r = requests.get(test_url, timeout=5)
+            r = session.get(test_url, timeout=6, allow_redirects=False)
+            if r.status_code in (200, 201, 204, 301, 302, 401, 403, 405):
+                with lock:
+                    found.add(f"{test_url} [{r.status_code}]")
+        except Exception:
+            pass
 
-            if r.status_code in [200, 401, 403]:
-                found.add(test_url)
-
-        except:
-            continue
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        list(pool.map(probe, wordlist))
 
     return found
 
-def contextual_endpoints(all_links):
-    contextual = set()
 
-    for link in all_links:
-        parsed = urlparse(link)
-
-        if parsed.query:
-            contextual.add(link)
-
-    return contextual
-
-def crawl(start_url):
-    print("\n -> CRAWLER")
-    visited=set()
-    queue=deque()
-    queue.append((start_url,0))
-    headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive"
-}
-    
-    start_netloc = urlparse(start_url).netloc
-    blocked_ext = (".jpg", ".png", ".css", ".pdf", ".zip", ".svg")
-
-    all_links=set()
-    all_rsc=set()
-    all_scripts=set()
-    all_inputs=set()
-    all_images=set()
-    all_params={}
-    all_forms= []
-
-    max_depth=1
-
-    while queue:
-        current_url,depth=queue.popleft()
-        current_url=current_url.split("#")[0]
-        parsed=urlparse(current_url)
-
-        if (
-        current_url in visited
-        or depth > max_depth
-        or parsed.netloc != start_netloc
-        or current_url.endswith(blocked_ext)
-        ):
-            continue
-
-        visited.add(current_url)
+def contextual_endpoint_scan(all_links: list) -> set:
+    return {link for link in all_links if urlparse(link).query}
 
 
+def run_endpoint_discovery(
+    url: str,
+    scripts: list,
+    links: list,
+    session: requests.Session,
+    threads: int,
+    wordlist: list,
+    skip_dynamic: bool,
+) -> dict:
+    log("Starting endpoint discovery...", "HEAD")
+    t0 = time.time()
 
-        try:
-            r=requests.get(current_url, headers=headers, timeout=5)
-
-            if not r.ok:
-                print("Request failed.", r.status_code)
-                continue
-
-            soup=BeautifulSoup(r.text,"lxml")
-
-            links=extract_links(soup, current_url) #Links
-
-            for link in links:
-                link=link.split("#")[0]
-                parsed_link=urlparse(link)
-                all_links.add(link)
-                if(parsed_link.netloc == start_netloc
-                   and link not in visited
-                   and not link.endswith(blocked_ext)):
-                    queue.append((link, depth+1))
-
-            resources=extract_resources(soup, current_url) #Resources
-
-            for resource in resources:
-                all_rsc.add(resource)
-
-            script=extract_script(soup, current_url) #Script
-
-            for jscrpt in script:
-                all_scripts.add(jscrpt)
-
-            inputs=extract_inputs(soup) #inputs
-
-            for inp in inputs:
-                all_inputs.add(inp)
-
-            images=extract_images(soup, current_url) #Images
-                 
-            for image in images:
-                all_images.add(image)
-
-            forms=extract_forms(soup, current_url) # forms
-            all_forms.extend(forms)
-
-            params=extract_parameters(current_url) # parameters
-
-            for key, value in params.items():
-                if key not in all_params:
-                    all_params[key]=set()
-                
-                for v in value:
-                    all_params[key].add(v)
-
-        except Exception as e:
-            print("Error: ", e)
-
-    print("Total links: ", len(all_links))
-    print("Total resources: ", len(all_rsc))
-    print("Total scripts: ", len(all_scripts))
-    print("Total inputs: ", len(all_inputs))
-    print("Total images: ", len(all_images))
-    print("Total forms: ", len(all_forms))
-    print("Total parameters: ", len(all_params))    
-
-    crawl_data = {
-    "links": list(all_links),
-    "scripts": list(all_scripts),
-    "images": list(all_images),
-    "resources": list(all_rsc),
-    "inputs": list(all_inputs),
-    "forms": all_forms,
-    "parameters": {k: list(v) for k, v in all_params.items()}
+    results = {
+        "static": [],
+        "dynamic": [], 
+        "hidden": [],
+        "contextual": [],
     }
 
-    return all_scripts, all_links, crawl_data
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_static  = pool.submit(static_endpoint_scan,  scripts, session, threads)
+        f_hidden  = pool.submit(hidden_endpoint_scan,  url, wordlist, session, threads)
+        f_context = pool.submit(contextual_endpoint_scan, links)
+
+        results["static"]      = sorted(f_static.result())
+        results["hidden"]      = sorted(f_hidden.result())
+        results["contextual"]  = sorted(f_context.result())
+
+    if not skip_dynamic:
+        results["dynamic"] = sorted(dynamic_endpoint_scan(url))
+
+    elapsed = time.time() - t0
+    log(f"Endpoint discovery done in {elapsed:.2f}s — "
+        f"static={len(results['static'])} | dynamic={len(results['dynamic'])} | "
+        f"hidden={len(results['hidden'])} | contextual={len(results['contextual'])}", "OK")
+
+    return results
+
+#Output
+
+def save_json(data: dict, filepath: str):
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=list)
+    log(f"Saved → {filepath}", "OK")
 
 
-def endpoints(start_url, all_scripts, all_links):
-    print("\n -> ENDPOINT EXTRACTION")
-
-    static_eps = static_endpoints(all_scripts) # static js parsing
-
-    dynamic_eps = dynamic_endpoints(start_url) # dynamic (runtime) 
-
-    hidden_eps = hidden_endpoints(start_url) # Hidden(fuzzing)
-
-    contextual_eps = contextual_endpoints(all_links) # Contextual
-
-    print("\nTotal Static endpoints:", len(static_eps))
-    print("Total Dynamic endpoints:", len(dynamic_eps))
-    print("Total Hidden endpoints:", len(hidden_eps))
-    print("Total Contextual endpoints:", len(contextual_eps))
-
-    endpoint_data = {
-    "static": list(static_eps),
-    "dynamic": list(dynamic_eps),
-    "hidden": list(hidden_eps),
-    "contextual": list(contextual_eps)
-    }
-
-    return endpoint_data
-
-start_crawl=time.time()
-scripts, links, crawl_data = crawl(url)
-end_crawl=time.time()
-print("Time taken: ", end_crawl - start_crawl, "seconds")
-
-run_endpoint = False
-if requires_js(url):
-    print("\nJS-heavy site detected → endpoint extraction will be slow")
-    q1 = input("Continue endpoint extraction? (Y/N): ")
-    if q1.lower() == "y":
-        run_endpoint = True
-else:
-    run_endpoint = True
-
-if run_endpoint:
-    start_endpoint=time.time()
-    endpoint_data=endpoints(url, scripts, links)
-    end_endpoint=time.time()
-    print("Time taken: ", end_endpoint - start_endpoint, "seconds")
-    
-def save_json(data, filename):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
-
-def save_txt(data, filename):
-    with open(filename, "w", encoding="utf-8") as f:
+def save_txt(data: dict, filepath: str):
+    with open(filepath, "w", encoding="utf-8") as f:
         for key, value in data.items():
-            f.write(f"\n {key.upper()} \n")
-
+            f.write(f"\n{'='*40}\n  {key.upper()}\n{'='*40}\n")
             if isinstance(value, dict):
                 for k, v in value.items():
-                    f.write(f"{k}: {v}\n")
-            else:
+                    f.write(f"  {k}: {v}\n")
+            elif isinstance(value, list):
                 for item in value:
-                    f.write(f"{item}\n")
+                    f.write(f"  {item}\n")
+            else:
+                f.write(f"  {value}\n")
+    log(f"Saved → {filepath}", "OK")
 
-save_json(crawl_data, "crawl.json")
-save_txt(crawl_data, "crawl.txt")
 
-save_json(endpoint_data, "endpoints.json")
-save_txt(endpoint_data, "endpoints.txt")
+def print_summary(crawl_data: dict, endpoint_data: dict | None):
+    print("  WEBSENTINAL — SUMMARY")
+    print(f"Links : {len(crawl_data['links'])}")
+    print(f"Scripts : {len(crawl_data['scripts'])}")
+    print(f"Images : {len(crawl_data['images'])}")
+    print(f"Resources : {len(crawl_data['resources'])}")
+    print(f"Forms : {len(crawl_data['forms'])}")
+    print(f"Inputs : {len(crawl_data['inputs'])}")
+    print(f"Parameters : {len(crawl_data['parameters'])}")
+    print(f"Comments : {len(crawl_data['comments'])}")
+    if endpoint_data:
+        print(f"  Static Endpoints : {len(endpoint_data['static'])}")
+        print(f"  Dynamic Endpoints : {len(endpoint_data['dynamic'])}")
+        print(f"  Hidden Endpoints : {len(endpoint_data['hidden'])}")
+        print(f"  Contextual Endpoints : {len(endpoint_data['contextual'])}")
 
-print("\nCheck the saved files for the extracted links")
+
+def main():
+    args = parse_args()
+
+    target = args.url.strip()
+    if not target.startswith("http"):
+        target = "https://" + target
+
+    session = make_session(args.timeout)
+
+    if args.wordlist:
+        try:
+            with open(args.wordlist, "r") as f:
+                wordlist = [line.strip() for line in f if line.strip()]
+            log(f"Loaded {len(wordlist)} words from {args.wordlist}")
+        except FileNotFoundError:
+            log(f"Wordlist file not found: {args.wordlist}. Using default.", "WARN")
+            wordlist = DEFAULT_WORDLIST
+    else:
+        wordlist = DEFAULT_WORDLIST
+
+    #Phase 1: Crawling
+    crawler = Crawler(
+        start_url=target,
+        depth=args.depth,
+        threads=args.threads,
+        timeout=args.timeout,
+        delay=args.delay,
+    )
+    crawl_data = crawler.run()
+
+    endpoint_data = None
+
+    #Phase 2: Endpoint
+    if not args.no_endpoints:
+        if not args.no_dynamic:
+            log("Checking if site is JS-heavy...", "INFO")
+            js_heavy = requires_js(target, session, args.timeout)
+            if js_heavy:
+                log("JS-heavy site detected — dynamic scan may take longer.", "WARN")
+
+        endpoint_data = run_endpoint_discovery(
+            url=target,
+            scripts=crawl_data["scripts"],
+            links=crawl_data["links"],
+            session=session,
+            threads=args.threads,
+            wordlist=wordlist,
+            skip_dynamic=args.no_dynamic,
+        )
+    else:
+        endpoint_data = {"static": [], "dynamic": [], "hidden": [], "contextual": []}
+
+    print_summary(crawl_data, endpoint_data)
+
+    if not args.no_save:
+        prefix = args.output
+        save_json(crawl_data,    f"{prefix}_crawl.json")
+        save_txt(crawl_data,     f"{prefix}_crawl.txt")
+        save_json(endpoint_data, f"{prefix}_endpoints.json")
+        save_txt(endpoint_data,  f"{prefix}_endpoints.txt")
+
+if __name__ == "__main__":
+    main()
