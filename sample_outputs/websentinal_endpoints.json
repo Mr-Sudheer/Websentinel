@@ -1,0 +1,13 @@
+{
+  "static": [
+    "https://popper.js.org/docs/v2/)"
+  ],
+  "dynamic": [
+    "https://mr-sudheer.github.io/assets/js/data/search.json"
+  ],
+  "hidden": [
+    "https://mr-sudheer.github.io/assets [301]",
+    "https://mr-sudheer.github.io/robots.txt [200]"
+  ],
+  "contextual": []
+}
