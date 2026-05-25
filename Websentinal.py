@@ -56,7 +56,7 @@ DEFAULT_WORDLIST = [
     "api", "admin", "internal", "debug", "v1", "v2", "v3", "private", "secret", "config", "settings", "dashboard",
     "login", "logout", "register", "signup", "auth", "oauth", "graphql", "rest", "docs", "swagger", "openapi",
     "health", "status", "metrics", "monitor", "actuator", "user", "users", "account", "accounts", "profile", "upload", "uploads", 
-    "files", "assets", "static", "backup", "test", "dev", "staging", "beta",
+    "files", "assets", "static", "backup", "test", "dev", "staging", "beta", "robots.txt"
 ]
 
 ENDPOINT_PATTERNS = [
@@ -456,16 +456,28 @@ def save_json(data: dict, filepath: str):
 
 def save_txt(data: dict, filepath: str):
     with open(filepath, "w", encoding="utf-8") as f:
+
         for key, value in data.items():
-            f.write(f"\n{'='*40}\n  {key.upper()}\n{'='*40}\n")
+            f.write(f"\n{'=' * 40}\n  {key.upper()}\n{'=' * 40}\n")
+
             if isinstance(value, dict):
                 for k, v in value.items():
-                    f.write(f"  {k}: {v}\n")
-            elif isinstance(value, list):
+                    if isinstance(v, (list, set)):
+                        f.write(f"\n{k}:\n")
+                        for item in sorted(map(str, v)):
+                            f.write(f"  {item}\n")
+                    else:
+                        f.write(f"{k}: {v}\n")
+
+            elif isinstance(value, (list, set)):
                 for item in value:
-                    f.write(f"  {item}\n")
+                    if isinstance(item, dict):
+                        f.write(json.dumps(item, indent=2))
+                        f.write("\n")
+                    else:
+                        f.write(f"{item}\n")
             else:
-                f.write(f"  {value}\n")
+                f.write(f"{value}\n")
     log(f"Saved → {filepath}", "OK")
 
 

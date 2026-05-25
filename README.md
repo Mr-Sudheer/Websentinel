@@ -59,6 +59,34 @@ options:
   --no-save            Don't save output files
 ```
 
+## CLI Output
+
+```text
+C:\Users\senor\AppData\Local\Programs\Python\Python313\python.exe p:/Git/Websentinal/Websentinal/Websentinal.py -u https://mr-sudheer.github.io/
+[HEAD] Starting crawl on https://mr-sudheer.github.io/ (depth=2, threads=15)
+[OK] Crawl complete in 3.61s — 12 pages | 26 links | 13 scripts | 0 forms | 12 inputs | 9 images
+[INFO] Checking if site is JS-heavy...
+[HEAD] Starting endpoint discovery...
+[OK] Endpoint discovery done in 11.02s — static=1 | dynamic=1 | hidden=2 | contextual=0
+  WEBSENTINAL — SUMMARY
+Links : 26
+Scripts : 13
+Images : 9
+Resources : 26
+Forms : 0
+Inputs : 12
+Parameters : 0
+Comments : 0
+  Static Endpoints : 1
+  Dynamic Endpoints : 1
+  Hidden Endpoints : 2
+  Contextual Endpoints : 0
+[OK] Saved → websentinal_crawl.json
+[OK] Saved → websentinal_crawl.txt
+[OK] Saved → websentinal_endpoints.json
+[OK] Saved → websentinal_endpoints.txt
+```
+
 ## Limitations
 
 - Some websites return **403 Forbidden**, which prevents effective crawling.  
@@ -69,3 +97,5 @@ options:
 ## ⚠️ Disclaimer
 
 This tool is intended for educational and ethical use only. Always obtain proper authorization before using it to test any web application. The author is not responsible for any misuse or damage caused by this tool.
+
+The output sample that I have provided is tested on my own website built using GitHub Pages, which is a static site hosting service. You can visit the site [here](https://mr-sudheer.github.io/).
