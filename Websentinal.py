@@ -20,10 +20,10 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python Websentinal.py -u https://example.com
-  python Websentinal.py -u https://example.com --depth 3 --threads 20
-  python Websentinal.py -u https://example.com --no-endpoints
-  python Websentinal.py -u https://example.com --wordlist my_wordlist.txt -o results
+  python Websentinel.py -u https://example.com
+  python Websentinel.py -u https://example.com --depth 3 --threads 20
+  python Websentinel.py -u https://example.com --no-endpoints
+  python Websentinel.py -u https://example.com --wordlist my_wordlist.txt -o results
         """
     )
     parser.add_argument("-u", "--url",         required=True,  help="Target URL")
@@ -34,7 +34,7 @@ Examples:
     parser.add_argument("--wordlist",          default=None,   help="Path to custom hidden-endpoint wordlist file")
     parser.add_argument("--no-endpoints",      action="store_true",  help="Skip endpoint discovery phase")
     parser.add_argument("--no-dynamic",        action="store_true",  help="Skip dynamic (Playwright) endpoint scanning")
-    parser.add_argument("-o", "--output",      default="websentinal", help="Output file prefix (default: websentinal)")
+    parser.add_argument("-o", "--output",      default="websentinel", help="Output file prefix (default: websentinel)")
     parser.add_argument("--no-save",           action="store_true",  help="Don't save output files")
     return parser.parse_args()
 
@@ -68,6 +68,20 @@ ENDPOINT_PATTERNS = [
     re.compile(r'''axios\.\w+\s*\(\s*["'`]([^"'`]+)["'`]'''),
 ]
 
+def print_banner():
+    banner = r"""
+ _       __     __   _____            __  _            __
+| |     / /__  / /_ / ___/___  ____  / /_(_)___  ___  / /
+| | /| / / _ \/ __ \\__ \/ _ \/ __ \/ __/ / __ \/ _ \/ /
+| |/ |/ /  __/ /_/ /__/ /  __/ / / / /_/ / / / /  __/ /
+|__/|__/\___/_.___/____/\___/_/ /_/\__/_/_/ /_/\___/_/
+"""
+    cyan = "\033[96m"
+    dim  = "\033[2m"
+    reset = "\033[0m"
+
+    print(f"{cyan}{banner}{reset}")
+    print(f"{dim}Security reconnaissance and intelligence gathering tool.{reset}\n")
 
 def clean_url(url: str) -> str:
     return urldefrag(url.split("#")[0])[0]
@@ -482,7 +496,7 @@ def save_txt(data: dict, filepath: str):
 
 
 def print_summary(crawl_data: dict, endpoint_data: dict | None):
-    print("  WEBSENTINAL — SUMMARY")
+    print("  WEBSENTINEL — SUMMARY")
     print(f"Links : {len(crawl_data['links'])}")
     print(f"Scripts : {len(crawl_data['scripts'])}")
     print(f"Images : {len(crawl_data['images'])}")
@@ -499,6 +513,7 @@ def print_summary(crawl_data: dict, endpoint_data: dict | None):
 
 
 def main():
+    print_banner()
     args = parse_args()
 
     target = args.url.strip()

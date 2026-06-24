@@ -1,6 +1,6 @@
-# WebSentinal
+# WebSentinel
 
-**WebSentinal** is a web crawler focused on crawling web applications and extracting potential attack surfaces such as links, endpoints, and input vectors.
+**WebSentinel** is a web crawler focused on crawling web applications and extracting potential attack surfaces such as links, endpoints, and input vectors.
 
 It is built to assist in the **reconnaissance phase** of security testing by mapping out the structure of a target application.
 
@@ -20,10 +20,10 @@ It is built to assist in the **reconnaissance phase** of security testing by map
 
 <b>1. Clone repo</b>
 ```bash
-git clone https://github.com/Mr-Sudheer/Websentinal.git
+git clone https://github.com/Mr-Sudheer/Websentinel.git
 ```
 ```bash
-cd Websentinal
+cd Websentinel
 ```
 <b>2. Install dependencies</b>
 ```bash
@@ -35,7 +35,7 @@ playwright install
 
 <b>3. Run the tool</b>
 ```bash
-python Websentinal.py
+python Websentinel.py
 ```
 
 ---
@@ -43,7 +43,7 @@ python Websentinal.py
 ## CLI options/flags
 
 ```bash
-usage: Websentinal.py [-h] -u URL [--depth DEPTH] [--threads THREADS] [--delay DELAY] [--timeout TIMEOUT] [--wordlist WORDLIST] [--no-endpoints] [--no-dynamic] [-o OUTPUT] [--no-save]
+usage: Websentinel.py [-h] -u URL [--depth DEPTH] [--threads THREADS] [--delay DELAY] [--timeout TIMEOUT] [--wordlist WORDLIST] [--no-endpoints] [--no-dynamic] [-o OUTPUT] [--no-save]
 
 options:
   -h, --help           show this help message and exit
@@ -55,36 +55,45 @@ options:
   --wordlist WORDLIST  Path to custom hidden-endpoint wordlist file
   --no-endpoints       Skip endpoint discovery phase
   --no-dynamic         Skip dynamic (Playwright) endpoint scanning
-  -o, --output OUTPUT  Output file prefix (default: websentinal)
+  -o, --output OUTPUT  Output file prefix (default: websentinel)
   --no-save            Don't save output files
 ```
 
 ## CLI Output
 
 ```text
-C:\Users\senor\AppData\Local\Programs\Python\Python313\python.exe p:/Git/Websentinal/Websentinal/Websentinal.py -u https://mr-sudheer.github.io/
+$ C:/Users/senor/AppData/Local/Programs/Python/Python313/python.exe p:/Git/Websentinal/Websentinal/Websentinal.py -u https://mr-sudheer.github.io/
+ 
+ _       __     __   _____            __  _            __
+| |     / /__  / /_ / ___/___  ____  / /_(_)___  ___  / /
+| | /| / / _ \/ __ \\__ \/ _ \/ __ \/ __/ / __ \/ _ \/ /
+| |/ |/ /  __/ /_/ /__/ /  __/ / / / /_/ / / / /  __/ /
+|__/|__/\___/_.___/____/\___/_/ /_/\__/_/_/ /_/\___/_/
+
+Security reconnaissance and intelligence gathering tool.
+
 [HEAD] Starting crawl on https://mr-sudheer.github.io/ (depth=2, threads=15)
-[OK] Crawl complete in 3.61s — 12 pages | 26 links | 13 scripts | 0 forms | 12 inputs | 9 images
+[OK] Crawl complete in 2.64s — 17 pages | 42 links | 13 scripts | 0 forms | 17 inputs | 17 images
 [INFO] Checking if site is JS-heavy...
 [HEAD] Starting endpoint discovery...
-[OK] Endpoint discovery done in 11.02s — static=1 | dynamic=1 | hidden=2 | contextual=0
-  WEBSENTINAL — SUMMARY
-Links : 26
+[OK] Endpoint discovery done in 7.60s — static=1 | dynamic=1 | hidden=2 | contextual=0
+  WEBSENTINEL — SUMMARY
+Links : 42
 Scripts : 13
-Images : 9
-Resources : 26
+Images : 17
+Resources : 31
 Forms : 0
-Inputs : 12
+Inputs : 17
 Parameters : 0
 Comments : 0
   Static Endpoints : 1
   Dynamic Endpoints : 1
   Hidden Endpoints : 2
   Contextual Endpoints : 0
-[OK] Saved → websentinal_crawl.json
-[OK] Saved → websentinal_crawl.txt
-[OK] Saved → websentinal_endpoints.json
-[OK] Saved → websentinal_endpoints.txt
+[OK] Saved → websentinel_crawl.json
+[OK] Saved → websentinel_crawl.txt
+[OK] Saved → websentinel_endpoints.json
+[OK] Saved → websentinel_endpoints.txt
 ```
 
 ## Limitations
